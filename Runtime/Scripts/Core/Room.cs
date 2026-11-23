@@ -137,6 +137,8 @@ namespace LiveKit
         public delegate void E2EeStateChangedDelegate(Participant participant, EncryptionState state);
         public delegate void DataTrackPublishedDelegate(RemoteDataTrack track);
         public delegate void DataTrackUnpublishedDelegate(string sid);
+        // Elsewhere TV patch (PATCHES.md): a track's subscription failed, with the native error text.
+        public delegate void SubscriptionFailedDelegate(string participantIdentity, string trackSid, string error);
 
         public string Sid { private set; get; }
         public string Name { private set; get; }
@@ -177,6 +179,7 @@ namespace LiveKit
         public event ParticipantDelegate ParticipantAttributesChanged;
         public event DataTrackPublishedDelegate DataTrackPublished;
         public event DataTrackUnpublishedDelegate DataTrackUnpublished;
+        public event SubscriptionFailedDelegate TrackSubscriptionFailed;
 
         public ConnectInstruction Connect(string url, string token, RoomOptions options)
         {
@@ -486,6 +489,9 @@ namespace LiveKit
                             TrackSubscribed?.Invoke(audioTrack, publication, participant);
                         }
                     }
+                    break;
+                case RoomEvent.MessageOneofCase.TrackSubscriptionFailed:
+                    TrackSubscriptionFailed?.Invoke(e.TrackSubscriptionFailed.ParticipantIdentity, e.TrackSubscriptionFailed.TrackSid, e.TrackSubscriptionFailed.Error);
                     break;
                 case RoomEvent.MessageOneofCase.TrackUnsubscribed:
                     {

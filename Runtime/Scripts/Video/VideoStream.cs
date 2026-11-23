@@ -8,6 +8,109 @@ using System.Collections;
 using LiveKit.Internal.FFI;
 namespace LiveKit
 {
+    // Elsewhere TV patch (PATCHES.md): a video frame's I420 planes as three R8 textures, double-buffered.
+    // Upload() writes a frame into the set that is not the front one and then makes it the front set, so a texture
+    // a frame in flight still samples is never written. Y, U and V are the front set; they change on every upload.
+    public sealed class VideoPlanes : IDisposable
+    {
+        private readonly Texture2D[] _y = new Texture2D[2];
+        private readonly Texture2D[] _u = new Texture2D[2];
+        private readonly Texture2D[] _v = new Texture2D[2];
+        private int _front = -1;
+
+        /// The luma size of the planes, 0 before the first upload. The chroma planes are half of it, rounded up.
+        public int Width { private set; get; }
+        public int Height { private set; get; }
+
+        /// The newest uploaded frame's planes; null before the first upload and after Dispose().
+        public Texture2D Y => _front < 0 ? null : _y[_front];
+        public Texture2D U => _front < 0 ? null : _u[_front];
+        public Texture2D V => _front < 0 ? null : _v[_front];
+
+        /// Uploads an I420 frame and swaps. False, with nothing changed, when the buffer is not a usable I420 frame.
+        public bool Upload(VideoFrameBuffer buffer)
+        {
+            if (buffer == null || !buffer.IsValid)
+                return false;
+            var info = buffer.Info;
+            if (info.Type != VideoBufferType.I420 || info.Components.Count < 3)
+                return false;
+            var y = info.Components[0];
+            var u = info.Components[1];
+            var v = info.Components[2];
+            return Upload((int)info.Width, (int)info.Height, (IntPtr)y.DataPtr, (int)y.Size, (IntPtr)u.DataPtr,
+                (int)u.Size, (IntPtr)v.DataPtr, (int)v.Size);
+        }
+
+        /// Uploads tightly packed planes (stride = plane width) and swaps. A new size releases both sets first.
+        public bool Upload(int width, int height, IntPtr y, int ySize, IntPtr u, int uSize, IntPtr v, int vSize)
+        {
+            if (width <= 0 || height <= 0 || y == IntPtr.Zero || u == IntPtr.Zero || v == IntPtr.Zero)
+                return false;
+            var chromaWidth = (width + 1) / 2;
+            var chromaHeight = (height + 1) / 2;
+            if (ySize < width * height || uSize < chromaWidth * chromaHeight || vSize < chromaWidth * chromaHeight)
+                return false;
+
+            if (width != Width || height != Height)
+            {
+                Release();
+                Width = width;
+                Height = height;
+            }
+
+            var back = _front == 0 ? 1 : 0;
+            Fill(ref _y[back], width, height, y);
+            Fill(ref _u[back], chromaWidth, chromaHeight, u);
+            Fill(ref _v[back], chromaWidth, chromaHeight, v);
+            _front = back;
+            return true;
+        }
+
+        /// Destroys both sets. Unity objects: call on the main thread.
+        public void Dispose()
+        {
+            Release();
+            Width = 0;
+            Height = 0;
+        }
+
+        private static void Fill(ref Texture2D texture, int width, int height, IntPtr data)
+        {
+            if (texture == null)
+            {
+                // The plane allocation site: R8, no mipmaps, linear, as YuvToRgbConverter's planes.
+                texture = new Texture2D(width, height, TextureFormat.R8, false, true);
+                texture.filterMode = FilterMode.Bilinear;
+                texture.wrapMode = TextureWrapMode.Clamp;
+            }
+            texture.LoadRawTextureData(data, width * height);
+            texture.Apply(false, false);
+        }
+
+        private void Release()
+        {
+            for (var i = 0; i < 2; i++)
+            {
+                Destroy(ref _y[i]);
+                Destroy(ref _u[i]);
+                Destroy(ref _v[i]);
+            }
+            _front = -1;
+        }
+
+        private static void Destroy(ref Texture2D texture)
+        {
+            if (texture == null)
+                return;
+            if (Application.isPlaying)
+                UnityEngine.Object.Destroy(texture);
+            else
+                UnityEngine.Object.DestroyImmediate(texture);
+            texture = null;
+        }
+    }
+
     public class VideoStream
     {
         public delegate void FrameReceiveDelegate(VideoFrame frame);
@@ -44,6 +147,13 @@ namespace LiveKit
         // pending frame into this slot before converting/uploading it, so this represents the
         // frame being actively consumed rather than the next frame arriving from Rust.
         public VideoFrameBuffer VideoBuffer { private set; get; }
+
+        // Elsewhere TV patch (PATCHES.md): plane output. When true, Update() uploads each frame's planes into
+        // Planes and stops there: no YuvToRgbConverter, Texture stays null and TextureReceived is not raised.
+        // TextureUploaded is raised after the swap. Set it before Start(); false (the default) is upstream.
+        public bool PlaneOutput { get; set; }
+        /// The double-buffered planes; null until the first frame arrives with PlaneOutput on.
+        public VideoPlanes Planes { private set; get; }
 
         protected bool _playing = false;
 
@@ -105,6 +215,8 @@ namespace LiveKit
                 // RenderTexture when Dispose() is called explicitly by user code.
                 _converter?.Dispose();
                 _converter = null;
+                Planes?.Dispose();
+                Planes = null;
                 // Texture is owned and cleaned up by _converter. Set to null to avoid holding a
                 // reference to a disposed RenderTexture.
                 Texture = null;
@@ -169,6 +281,14 @@ namespace LiveKit
                 {
                     VideoBuffer.Dispose();
                     VideoBuffer = null;
+                    continue;
+                }
+
+                if (PlaneOutput)
+                {
+                    if (Planes == null) Planes = new VideoPlanes();
+                    if (Planes.Upload(VideoBuffer))
+                        TextureUploaded?.Invoke();
                     continue;
                 }
 
