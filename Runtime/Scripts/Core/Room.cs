@@ -172,13 +172,19 @@ namespace LiveKit
         public event DisconnectDelegate DisconnectedWithReason;
         // Elsewhere fork (TV T4p): the end of the native room. Disconnect() tears the C# room down at once, but the
         // core closes the native room (the leave sent to the server, the peer connections) on its own thread and
-        // confirms it later with a DisconnectCallback. Closed is raised once per connection, on the main thread, when
-        // the native room is gone: after a local Disconnect, when the core confirms it (or when the FFI client panics);
-        // after a disconnect by the server or a panic, at the end of the teardown. IsClosed says it has been. An app
-        // that must not join again with the same identity while the old connection is still in the room waits for it.
+        // confirms it later with a DisconnectCallback. Closed is raised exactly once per connection, on the main thread:
+        // after a local Disconnect, when the core confirms the close (or when the FFI client panics); after a
+        // disconnect by the server or a panic, at the end of the teardown. In all of these the native room is gone.
+        // One exception: if the same Room connects again before the core has confirmed the earlier close, that
+        // connection's Closed is raised at the new connect, before the reset (BeginConnection), and then it does not
+        // prove the earlier native room is gone. Until the core answers or panics (or the Room connects again), the
+        // close's handlers stay on FfiClient and hold this Room. IsClosed says Closed has been raised for the current
+        // connection. An app that must not join again with the same identity while the old connection is still in
+        // the room waits for Closed before it connects again (TvRoomLink does).
         public event ConnectionDelegate Closed;
         public bool IsClosed { get; private set; }
         private ulong _closeAsyncId;
+        private bool _closePending; // a close was sent and Closed has not been raised for it yet
         public event ConnectionDelegate Reconnecting;
         public event ConnectionDelegate Reconnected;
         public event E2EeStateChangedDelegate E2EeStateChanged;
@@ -282,6 +288,7 @@ namespace LiveKit
             using var request = FFIBridge.Instance.NewRequest<DisconnectRequest>();
             request.request.RoomHandle = (ulong)RoomHandle.DangerousGetHandle();
             _closeAsyncId = request.RequestAsyncId;
+            _closePending = true;
             FfiClient.Instance.DisconnectReceived += OnCloseConfirmed;
             FfiClient.Instance.PanicReceived += OnClosePanic;
             try
@@ -309,11 +316,22 @@ namespace LiveKit
         // Elsewhere fork (TV T4p): after a panic the core answers nothing more; its rooms are gone.
         private void OnClosePanic(Panic e) => MarkClosed();
 
+        // Elsewhere fork (TV T4p): a new connection has a close of its own; an earlier one's answer is not it. An earlier
+        // close still unconfirmed is reported first (its Closed raised, its handlers taken off FfiClient), so no
+        // connection's Closed is dropped by the reset.
+        private void BeginConnection()
+        {
+            if (_closePending)
+                MarkClosed();
+            IsClosed = false;
+        }
+
         // Elsewhere fork (TV T4p): raises Closed once per connection; a handler's fault never escapes into the SDK.
         private void MarkClosed()
         {
             FfiClient.Instance.DisconnectReceived -= OnCloseConfirmed;
             FfiClient.Instance.PanicReceived -= OnClosePanic;
+            _closePending = false;
             if (IsClosed)
                 return;
             IsClosed = true;
@@ -721,10 +739,7 @@ namespace LiveKit
             // A Room may be connected again after a disconnect: each connect starts a
             // fresh lifecycle.
             _disposed = false;
-            // Elsewhere fork (TV T4p): a new connection has a close of its own; an earlier one's answer is not it.
-            FfiClient.Instance.DisconnectReceived -= OnCloseConfirmed;
-            FfiClient.Instance.PanicReceived -= OnClosePanic;
-            IsClosed = false;
+            BeginConnection();
 
             UpdateFromInfo(info.Result.Room.Info);
             LocalParticipant = new LocalParticipant(info.Result.LocalParticipant, this);
