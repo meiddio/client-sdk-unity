@@ -249,6 +249,10 @@ namespace LiveKit.Internal.FFI
                 case SetRemoteTrackPublicationQualityRequest setRemoteTrackPublicationQualityRequest:
                     ffiRequest.SetRemoteTrackPublicationQuality = setRemoteTrackPublicationQualityRequest;
                     break;
+                // Elsewhere fork (TV spike S1g): RemoteTrackPublication.SetEnabled
+                case EnableRemoteTrackPublicationRequest enableRemoteTrackPublicationRequest:
+                    ffiRequest.EnableRemoteTrackPublication = enableRemoteTrackPublicationRequest;
+                    break;
                 // Data Track
                 case PublishDataTrackRequest publishDataTrackRequest:
                     ffiRequest.PublishDataTrack = publishDataTrackRequest;

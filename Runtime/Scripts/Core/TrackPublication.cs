@@ -91,6 +91,22 @@ namespace LiveKit
             setRemoteTrackPublicationQuality.Quality = quality;
             using var response = request.Send();
         }
+
+        // Elsewhere fork (TV spike S1g; the product's SDK fork, T4e, needs the same): upstream 356bf5df has the FFI
+        // request but no C# method for it.
+        /// <summary>
+        /// Enable or disable the subscribed track at the server: when disabled, the server stops forwarding its media
+        /// while the subscription is kept (unlike the track-level IRemoteTrack.SetEnabled, which only disables the
+        /// track locally).
+        /// </summary>
+        public void SetEnabled(bool enabled)
+        {
+            using var request = FFIBridge.Instance.NewRequest<EnableRemoteTrackPublicationRequest>();
+            var enableRemoteTrackPublication = request.request;
+            enableRemoteTrackPublication.TrackPublicationHandle = (ulong)Handle.DangerousGetHandle();
+            enableRemoteTrackPublication.Enabled = enabled;
+            using var response = request.Send();
+        }
     }
 
     public sealed class LocalTrackPublication : TrackPublication
